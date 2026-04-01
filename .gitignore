@@ -1,0 +1,10 @@
+# common ignores
+*.zip
+*.jar
+*.log
+.gradle/
+build/
+out/
+.idea/
+*.class
+*.iml

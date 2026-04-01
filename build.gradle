@@ -1,0 +1,283 @@
+import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
+
+plugins {
+    id 'io.freefair.lombok' version '8.6'
+    id 'xyz.wagyourtail.unimined' version '1.2.9' apply false
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
+}
+
+apply plugin: 'java'
+apply plugin: 'maven-publish'
+
+repositories {
+    mavenCentral()
+}
+
+ext {
+    platforms = ['fabric']
+    platforms_cap = ['Fabric']
+}
+
+subprojects {
+    apply plugin: 'java'
+    apply plugin: 'java-library'
+    apply plugin: 'idea'
+    apply plugin: 'xyz.wagyourtail.unimined'
+    apply plugin: 'io.freefair.lombok'
+    apply plugin: 'com.github.johnrengelman.shadow'
+
+    group 'me.earth.pingbypass'
+    version rootProject.version
+
+    base {
+        archivesName = project.name
+    }
+
+    sourceSets {
+        fabric
+    }
+
+    repositories {
+        mavenCentral()
+        maven { url = "https://files.minecraftforge.net/maven" }
+        maven { name = "sponge"; url = "https://repo.spongepowered.org/maven" }
+        maven { url = "https://maven.wagyourtail.xyz/releases" }
+        maven { name = '3arthMaven'; url = 'https://3arthqu4ke.github.io/maven' }
+    }
+
+    unimined.minecraft {
+        version rootProject.minecraft_version
+        mappings {
+            mojmap()
+            devFallbackNamespace 'mojmap'
+        }
+        defaultRemapJar = false
+    }
+
+    unimined.minecraft(sourceSets.fabric) {
+        combineWith(sourceSets.main)
+        fabric {
+            loader rootProject.fabric_version
+        }
+        defaultRemapJar = true
+    }
+
+    configurations {
+        lwjglAgent
+        runtimeOnly.extendsFrom lwjglAgent
+        javaDocLibs
+        compileOnly.extendsFrom javaDocLibs
+    }
+
+    dependencies {
+        compileOnly 'org.jetbrains:annotations:24.0.1'
+        testImplementation 'org.junit.jupiter:junit-jupiter-api:5.9.2'
+        testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.9.2'
+        api 'com.google.code.gson:gson:2.10.1'
+        compileOnly 'org.spongepowered:mixin:0.8.5-SNAPSHOT'
+        compileOnly 'me.earth.headlessmc:headlessmc:1.8.1'
+
+        if (rootProject.property('hmc.lwjgl').toBoolean()) {
+            lwjglAgent "me.earth.headlessmc:headlessmc-lwjgl:1.8.1"
+        }
+    }
+
+    test {
+        useJUnitPlatform()
+        testLogging {
+            showStandardStreams = true
+            events "failed"
+            exceptionFormat "full"
+        }
+    }
+
+    def dependsOnBeforeJavadocAndSourcesJar = new HashSet<>(assemble.dependsOn)
+
+    java {
+        withSourcesJar()
+        withJavadocJar()
+    }
+
+    assemble {
+        dependsOn.removeIf { !dependsOnBeforeJavadocAndSourcesJar.contains(it) }
+    }
+
+    if (sourceSets.main.java.srcDirs.stream().anyMatch { it.exists()}) {
+        javadoc {
+            options.addStringOption('Xdoclint:none', '-quiet')
+            options.linkSource true
+        }
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        if (JavaVersion.current().isJava9Compatible()) {
+            it.options.release.set(17)
+        }
+    }
+
+    idea {
+        module {
+            inheritOutputDirs = false
+            outputDir = compileJava.destinationDirectory.getAsFile().getOrNull()
+            testOutputDir = compileTestJava.destinationDirectory.getAsFile().getOrNull()
+        }
+    }
+
+    processFabricResources {
+        inputs.property "version", project.version
+        filesMatching("fabric.mod.json") {
+            expand "version": project.version
+        }
+    }
+
+    afterEvaluate {
+        if (tasks.findByName('fabricRunClient')) {
+            fabricRunClient {
+                configureTaskForLwjglAgent(project, it)
+            }
+        }
+    }
+}
+
+private void configureTaskForLwjglAgent(Project project, JavaExec exec) {
+    exec.standardInput = System.in
+    if (rootProject.property('hmc.lwjgl').toBoolean()) {
+        exec.jvmArgs += ["-javaagent:${project.configurations.lwjglAgent.files.iterator().next()}"]
+        exec.systemProperties['joml.nounsafe'] = 'true'
+        exec.systemProperties['fabric.systemLibraries'] = "${project.configurations.lwjglAgent.files.iterator().next()}"
+    }
+}
+
+subprojects {
+    if (project == project(':pb-api')) {
+        configurations {
+            jarLibsImpl
+            implementation.extendsFrom jarLibsImpl
+        }
+
+        for (String platform_capitalized : rootProject.ext.platforms_cap) {
+            def platform = platform_capitalized.toLowerCase()
+            def remapJarTask = tasks.named("remap${platform_capitalized}Jar", AbstractArchiveTask).get()
+            def shadowTask = tasks.register("${platform}ShadowJar", ShadowJar) {
+                dependsOn(remapJarTask)
+                group = 'build'
+                archiveClassifier = "${platform}-release"
+                from remapJarTask.outputs
+                it.configurations += [ project.configurations.jarLibsImpl ]
+            }
+            rootProject.tasks.named('build') { finalizedBy(shadowTask) }
+        }
+    } else if ([project(':pb-server'), project(':pb-client')].contains(project)) {
+        ext {
+            extension = project.name.contains('server') ? 'server' : 'client'
+            extension_cap = project.name.contains('server') ? 'Server' : 'Client'
+        }
+
+        dependencies {
+            implementation project(':pb-api')
+        }
+
+        for (String platform_capitalized : rootProject.ext.platforms_cap) {
+            def platform = platform_capitalized.toLowerCase()
+            def remapJarTask = tasks.named("remap${platform_capitalized}Jar", AbstractArchiveTask).get()
+            remapJarTask.archiveClassifier = "${platform}-plugin"
+            def shadowTask = project(':pb-api').tasks.named("${platform}ShadowJar", AbstractArchiveTask).get()
+            
+            def standaloneTask = tasks.register("${platform}StandaloneJar", Jar) { jarTask ->
+                inputs.property "version", project.version
+                inputs.property "platform", platform
+                dependsOn(remapJarTask, shadowTask)
+                outputs.upToDateWhen { false }
+                duplicatesStrategy = DuplicatesStrategy.INCLUDE
+                group = 'build'
+                archiveBaseName = jar.archiveBaseName
+                archiveClassifier = "${platform}-standalone"
+
+                from(shadowTask.outputs.files.singleFile) {
+                    rename {
+                        platform == 'fabric' ? "META-INF/jars/${it}" : "META-INF/jarjar/${it}"
+                    }
+                }
+
+                from({ zipTree(remapJarTask.outputs.files.singleFile) })
+                if (platform == 'fabric') {
+                    from(project.file('src/fabric/resources/fabric.mod.json')) {
+                        eachFile {
+                            filter { line ->
+                                line.replace('"jars": []', "\"jars\": [ { \"file\": \"META-INF/jars/${shadowTask.outputs.files.singleFile.name}\" } ]")
+                                        .replace("\${version}", project.version)
+                            }
+                        }
+                    }
+                }
+            }
+            rootProject.tasks.named('build') { finalizedBy(standaloneTask) }
+        }
+
+        afterEvaluate {
+            def pb_api = project(':pb-api')
+            if (tasks.findByName('fabricRunClient')) {
+                fabricRunClient {
+                    dependsOn(pb_api.tasks.named("fabricJar"))
+                    classpath += files("${pb_api.projectDir}/build/libs/${pb_api.name}-${pb_api.version}-fabric-dev.jar")
+                }
+            }
+
+            tasks.withType(Jar).configureEach {
+                manifest {
+                    attributes(
+                        'MixinConfigs': "mixins.pingbypass_${extension}.json",
+                        'MixinConnector': "me.earth.pingbypass.${extension}.launch.${extension_cap}MixinConnector",
+                        'Implementation-Title': "PingBypass-${extension_cap}",
+                        'Implementation-Version': project.version
+                    )
+                }
+            }
+        }
+    }
+}
+
+afterEvaluate {
+    publishing {
+        repositories {
+            if (System.getenv("PB_OTHER_REPO") != null) {
+                maven { name = 'otherrepo'; url = "${System.getenv("PB_OTHER_REPO")}" }
+            }
+            if (System.getenv('DEPLOY_TO_GITHUB_PACKAGES_URL') == null) {
+                maven { name = 'BuildDirMaven'; url = rootProject.layout.buildDirectory.dir('maven') }
+            } else {
+                maven {
+                    name = 'GithubPagesMaven'
+                    url = System.getenv('DEPLOY_TO_GITHUB_PACKAGES_URL')
+                    credentials {
+                        username = System.getenv('GITHUB_USER')
+                        password = System.getenv('GITHUB_TOKEN')
+                    }
+                }
+            }
+        }
+    }
+
+    subprojects {
+        publishing {
+            publications {
+                "$project.name"(MavenPublication) {
+                    groupId "${project.group}"
+                    artifactId "${project.archivesBaseName.toLowerCase()}"
+                    version "${project.version}"
+                    from components.java
+                    for (String platform_capitalized : rootProject.ext.platforms_cap) {
+                        String platform = platform_capitalized.toLowerCase()
+                        artifact tasks.named("${platform}Jar").get()
+                        artifact tasks.named("remap${platform_capitalized}Jar").get()
+                        if (project == project(':pb-api')) {
+                            artifact tasks.named("${platform}ShadowJar").get()
+                        } else if ([project(':pb-server'), project(':pb-client')].contains(project)) {
+                            artifact tasks.named("${platform}StandaloneJar").get()
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
