@@ -29,18 +29,18 @@ jobs:
         run: chmod +x gradlew
 
       - name: Build with Gradle
-        run: ./gradlew build --no-daemon
+        run: ./gradlew build jar --no-daemon
 
-      - name: Artifacts
+      - name: Prepare Artifacts
         run: |
           mkdir -p output
-          find . -name "*standalone.jar" -exec cp {} output/ \;
-          find . -name "*release.jar" -exec cp {} output/ \;
+          find . -path "*/build/libs/*.jar" -exec cp {} output/ \;
+          ls -R output/
 
-      - name: Upload Build Artifacts
+      - name: pingbypass artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Pingbypass-Artifacts
+          name: Pingbypass-All-Jars
           path: output/
           if-no-files-found: error
           
